@@ -1,0 +1,12 @@
+[package]
+name = "ascii_art_gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+image = "0.25"
+imageproc = "0.25"
+ab_glyph = "0.2"
+rfd = "0.15"
