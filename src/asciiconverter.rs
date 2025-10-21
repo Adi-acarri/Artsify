@@ -56,7 +56,6 @@ impl Default for AsciiSettings {
 pub struct ConversionResult {
     pub ascii_art: String,
     pub colored_ascii: Vec<Vec<(egui::Color32, char)>>,
-    pub preview_image: Option<egui::ColorImage>,
 }
 
 // RGB to HSV conversion
@@ -199,12 +198,9 @@ pub fn convert_image_to_ascii(
         colored_result.push(row);
     }
 
-    let preview_image = generate_preview(&colored_result);
-
     ConversionResult {
         ascii_art: ascii_result,
         colored_ascii: colored_result,
-        preview_image,
     }
 }
 

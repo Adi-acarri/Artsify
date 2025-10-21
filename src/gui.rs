@@ -20,18 +20,17 @@ pub struct AsciiArtApp {
     input_image: Option<DynamicImage>,
     ascii_art: String,
     colored_ascii: Vec<Vec<(egui::Color32, char)>>,
-    preview_image: Option<egui::ColorImage>,
     pub settings: AsciiSettings,
     image_path: String,
     original_dimensions: (u32, u32),
     processing: bool,
+    ascii_applied: bool,
     result_receiver: Option<mpsc::Receiver<ConversionResult>>,
     file_dialog_receiver: Option<mpsc::Receiver<Option<PathBuf>>>,
     save_dialog_receiver: Option<mpsc::Receiver<Option<PathBuf>>>,
     save_type: SaveType,
     status_message: Option<(String, egui::Color32)>,
     show_original: bool,
-    show_ascii_text: bool,
     // Icon textures
     icon_folder: Option<egui::TextureHandle>,
     icon_save: Option<egui::TextureHandle>,
@@ -51,18 +50,17 @@ impl Default for AsciiArtApp {
             input_image: None,
             ascii_art: String::new(),
             colored_ascii: Vec::new(),
-            preview_image: None,
             settings: AsciiSettings::default(),
             image_path: String::new(),
             original_dimensions: (0, 0),
             processing: false,
+            ascii_applied: false,
             result_receiver: None,
             file_dialog_receiver: None,
             save_dialog_receiver: None,
             save_type: SaveType::Image,
             status_message: None,
             show_original: false,
-            show_ascii_text: false,
             icon_folder: None,
             icon_save: None,
             icon_text: None,
@@ -75,10 +73,7 @@ impl AsciiArtApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut app = Self::default();
-        
-        // Load icons
         app.load_icons(&cc.egui_ctx);
-        
         app
     }
     
@@ -172,7 +167,9 @@ impl AsciiArtApp {
                 self.input_image = Some(img.clone());
                 self.image_path = path.to_string();
                 self.status_message = None;
-                self.start_conversion();
+                self.ascii_applied = false;
+                self.ascii_art = String::new();
+                self.colored_ascii = Vec::new();
                 Ok(())
             }
             Err(e) => {
@@ -181,6 +178,11 @@ impl AsciiArtApp {
                 Err(error_msg)
             }
         }
+    }
+
+    fn apply_ascii_filter(&mut self) {
+        self.ascii_applied = true;
+        self.start_conversion();
     }
 
     fn start_conversion(&mut self) {
@@ -204,7 +206,6 @@ impl AsciiArtApp {
             if let Ok(result) = receiver.try_recv() {
                 self.ascii_art = result.ascii_art;
                 self.colored_ascii = result.colored_ascii;
-                self.preview_image = result.preview_image;
                 self.processing = false;
                 self.result_receiver = None;
             }
@@ -265,7 +266,7 @@ impl AsciiArtApp {
     }
 
     fn update_conversion(&mut self) {
-        if !self.processing {
+        if !self.processing && self.ascii_applied {
             self.start_conversion();
         }
     }
@@ -277,7 +278,7 @@ impl eframe::App for AsciiArtApp {
         self.check_file_dialog_result();
         self.check_save_dialog_result();
 
-        // Left sidebar - DitherBoy style
+        // Left sidebar
         egui::SidePanel::left("control_panel")
             .default_width(300.0)
             .resizable(true)
@@ -330,54 +331,77 @@ impl eframe::App for AsciiArtApp {
                         egui::CollapsingHeader::new("⚙️ ASCII Settings")
                             .default_open(true)
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("Colors:");
-                                    if ui.checkbox(&mut self.settings.use_colors, "").changed() {
-                                        self.update_conversion();
+                                let has_image = self.input_image.is_some();
+                                
+                                if ui.add_enabled(has_image && !self.processing, 
+                                    egui::Button::new(if self.ascii_applied { "✓ Applied" } else { "Apply ASCII Filter" })
+                                    .min_size(egui::vec2(ui.available_width(), 30.0)))
+                                    .clicked() {
+                                    self.apply_ascii_filter();
+                                }
+                                
+                                if self.ascii_applied {
+                                    if ui.button("Reset to Original").clicked() {
+                                        self.ascii_applied = false;
+                                        self.ascii_art = String::new();
+                                        self.colored_ascii = Vec::new();
                                     }
-                                });
+                                }
                                 
-                                ui.add_space(5.0);
+                                ui.add_space(10.0);
                                 
-                                ui.label("Detail Level:");
-                                let current_detail = self.settings.detail_level.clone();
-                                egui::ComboBox::from_id_salt("detail_level")
-                                    .selected_text(current_detail.name())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Low, DetailLevel::Low.name());
-                                        ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Medium, DetailLevel::Medium.name());
-                                        ui.selectable_value(&mut self.settings.detail_level, DetailLevel::High, DetailLevel::High.name());
-                                        ui.selectable_value(&mut self.settings.detail_level, DetailLevel::VeryHigh, DetailLevel::VeryHigh.name());
-                                        ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Custom(100), "Custom");
+                                let enabled = self.ascii_applied;
+                                
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Colors:");
+                                        if ui.checkbox(&mut self.settings.use_colors, "").changed() {
+                                            self.update_conversion();
+                                        }
                                     });
-                                
-                                if let DetailLevel::Custom(width) = &mut self.settings.detail_level {
-                                    ui.add(egui::Slider::new(width, 50..=400).text("chars"));
-                                    if ui.button("Apply").clicked() {
+                                    
+                                    ui.add_space(5.0);
+                                    
+                                    ui.label("Detail Level:");
+                                    let current_detail = self.settings.detail_level.clone();
+                                    egui::ComboBox::from_id_salt("detail_level")
+                                        .selected_text(current_detail.name())
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Low, DetailLevel::Low.name());
+                                            ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Medium, DetailLevel::Medium.name());
+                                            ui.selectable_value(&mut self.settings.detail_level, DetailLevel::High, DetailLevel::High.name());
+                                            ui.selectable_value(&mut self.settings.detail_level, DetailLevel::VeryHigh, DetailLevel::VeryHigh.name());
+                                            ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Custom(100), "Custom");
+                                        });
+                                    
+                                    if let DetailLevel::Custom(width) = &mut self.settings.detail_level {
+                                        ui.add(egui::Slider::new(width, 50..=400).text("chars"));
+                                        if ui.button("Apply").clicked() {
+                                            self.update_conversion();
+                                        }
+                                    }
+                                    
+                                    if current_detail != self.settings.detail_level && !matches!(self.settings.detail_level, DetailLevel::Custom(_)) {
                                         self.update_conversion();
                                     }
-                                }
-                                
-                                if current_detail != self.settings.detail_level && !matches!(self.settings.detail_level, DetailLevel::Custom(_)) {
-                                    self.update_conversion();
-                                }
-                                
-                                ui.add_space(5.0);
-                                
-                                ui.label("Brightness:");
-                                if ui.add(egui::Slider::new(&mut self.settings.brightness, 0.1..=2.0).step_by(0.1)).changed() {
-                                    self.update_conversion();
-                                }
-                                
-                                ui.label("Contrast:");
-                                if ui.add(egui::Slider::new(&mut self.settings.contrast, 0.1..=2.0).step_by(0.1)).changed() {
-                                    self.update_conversion();
-                                }
-                                
-                                ui.add_space(5.0);
-                                
-                                ui.label("Font Size:");
-                                ui.add(egui::Slider::new(&mut self.settings.font_size, 6.0..=24.0).text("pt").step_by(1.0));
+                                    
+                                    ui.add_space(5.0);
+                                    
+                                    ui.label("Brightness:");
+                                    if ui.add(egui::Slider::new(&mut self.settings.brightness, 0.1..=2.0).step_by(0.1)).changed() {
+                                        self.update_conversion();
+                                    }
+                                    
+                                    ui.label("Contrast:");
+                                    if ui.add(egui::Slider::new(&mut self.settings.contrast, 0.1..=2.0).step_by(0.1)).changed() {
+                                        self.update_conversion();
+                                    }
+                                    
+                                    ui.add_space(5.0);
+                                    
+                                    ui.label("Font Size:");
+                                    ui.add(egui::Slider::new(&mut self.settings.font_size, 6.0..=24.0).text("pt").step_by(1.0));
+                                });
                             });
                         
                         ui.add_space(5.0);
@@ -387,7 +411,6 @@ impl eframe::App for AsciiArtApp {
                             .default_open(true)
                             .show(ui, |ui| {
                                 ui.checkbox(&mut self.show_original, "Show Original");
-                                ui.checkbox(&mut self.show_ascii_text, "Show ASCII Text");
                             });
                         
                         ui.add_space(5.0);
@@ -396,7 +419,7 @@ impl eframe::App for AsciiArtApp {
                         egui::CollapsingHeader::new("💾 Export")
                             .default_open(true)
                             .show(ui, |ui| {
-                                let can_save = self.save_dialog_receiver.is_none() && !self.colored_ascii.is_empty();
+                                let can_save = self.save_dialog_receiver.is_none() && !self.colored_ascii.is_empty() && self.ascii_applied;
                                 
                                 ui.horizontal(|ui| {
                                     if ui.add_enabled(can_save, egui::Button::new("Image")).on_hover_text("Save as PNG/JPEG").clicked() {
@@ -448,7 +471,7 @@ impl eframe::App for AsciiArtApp {
                         ui.add_space(10.0);
                         
                         // Info Section
-                        if !self.colored_ascii.is_empty() && !self.processing {
+                        if self.ascii_applied && !self.colored_ascii.is_empty() && !self.processing {
                             let char_width = self.colored_ascii[0].len();
                             let char_height = self.colored_ascii.len();
                             let char_pixel_width = self.settings.font_size * 0.6;
@@ -479,57 +502,31 @@ impl eframe::App for AsciiArtApp {
                     });
             });
 
-        // Central panel - Large preview area
+        // Central panel
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.colored_ascii.is_empty() {
-                // Welcome screen
+            if self.input_image.is_none() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() / 2.0 - 50.0);
                     ui.heading("📸 Drop an image or use File → Open");
                     ui.label("Supported formats: PNG, JPG, BMP, GIF, WebP");
-                });/ ASCII preview
+                });
             } else {
-                // Show preview or ASCII text
                 egui::ScrollArea::both()
                     .id_salt("preview_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.show_ascii_text {
-                            // ASCII text view
-                            ui.style_mut().override_font_id = Some(egui::FontId::monospace(6.0));
-                            
-                            for row in &self.colored_ascii {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 0.0;
-                                    for (color, ch) in row {
-                                        ui.colored_label(*color, ch.to_string());/ ASCII preview
-                                    }
-                                });
-                            }
-                        } else if self.show_original {
-                            // Original image
+                        if self.show_original || !self.ascii_applied {
+                            // Show original
                             if let Some(input_image) = &self.input_image {
                                 let rgba = input_image.to_rgba8();
                                 let size = [input_image.width() as usize, input_image.height() as usize];
                                 let pixels = rgba.as_flat_samples();
-                                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                    size,
-                                    pixels.as_slice(),
-                                );
+                                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
                                 
-                                let texture = ui.ctx().load_texture(
-                                    "original_image",
-                                    color_image,
-                                    egui::TextureOptions::default()
-                                );
-                                
+                                let texture = ui.ctx().load_texture("original_image", color_image, egui::TextureOptions::default());
                                 let available_size = ui.available_size();
                                 let texture_size = texture.size_vec2();
-                                
-                                let scale_x = available_size.x / texture_size.x;
-                                let scale_y = available_size.y / texture_size.y;
-                                let scale = scale_x.min(scale_y).min(3.0).max(0.1);
-                                
+                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(3.0).max(0.1);
                                 let display_size = texture_size * scale;
                                 
                                 ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
@@ -537,28 +534,28 @@ impl eframe::App for AsciiArtApp {
                                     size: display_size,
                                 }));
                             }
-                        } else {
-                            // ASCII preview
-                            if let Some(preview_image) = &self.preview_image {
-                                let texture = ui.ctx().load_texture(
-                                    "preview",
-                                    preview_image.clone(),
-                                    egui::TextureOptions::default()
-                                );
-                                
-                                let available_size = ui.available_size();
-                                let texture_size = texture.size_vec2();
-                                
-                                let scale_x = available_size.x / texture_size.x;
-                                let scale_y = available_size.y / texture_size.y;
-                                let scale = scale_x.min(scale_y).min(3.0).max(0.1);
-                                
-                                let display_size = texture_size * scale;
-                                
-                                ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
-                                    id: texture.id(),
-                                    size: display_size,
-                                }));
+                        } else if self.ascii_applied && !self.colored_ascii.is_empty() {
+                            // Show ASCII rendered
+                            match Self::render_ascii_to_image(&self.colored_ascii, self.settings.font_size, self.settings.use_colors) {
+                                Ok(img) => {
+                                    let size = [img.width() as usize, img.height() as usize];
+                                    let pixels = img.as_flat_samples();
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                                    
+                                    let texture = ui.ctx().load_texture("ascii_rendered", color_image, egui::TextureOptions::default());
+                                    let available_size = ui.available_size();
+                                    let texture_size = texture.size_vec2();
+                                    let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(3.0).max(0.1);
+                                    let display_size = texture_size * scale;
+                                    
+                                    ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
+                                        id: texture.id(),
+                                        size: display_size,
+                                    }));
+                                }
+                                Err(e) => {
+                                    ui.colored_label(egui::Color32::RED, format!("Preview error: {}", e));
+                                }
                             }
                         }
                     });
