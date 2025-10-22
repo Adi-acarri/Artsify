@@ -58,56 +58,53 @@ pub struct ConversionResult {
     pub colored_ascii: Vec<Vec<(egui::Color32, char)>>,
 }
 
-// RGB to HSV conversion
+// Optimized RGB to HSV conversion
 fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
+    let max = r.max(g.max(b));
+    let min = r.min(g.min(b));
     let delta = max - min;
     
     let v = max;
-    
-    let s = if max == 0.0 {
-        0.0
-    } else {
-        delta / max
-    };
+    let s = if max == 0.0 { 0.0 } else { delta / max };
     
     let h = if delta == 0.0 {
         0.0
-    } else if max == r {
-        60.0 * (((g - b) / delta) % 6.0)
-    } else if max == g {
-        60.0 * (((b - r) / delta) + 2.0)
     } else {
-        60.0 * (((r - g) / delta) + 4.0)
+        let h_raw = if max == r {
+            (g - b) / delta + (if g < b { 6.0 } else { 0.0 })
+        } else if max == g {
+            (b - r) / delta + 2.0
+        } else {
+            (r - g) / delta + 4.0
+        };
+        h_raw * 60.0
     };
-    
-    let h = if h < 0.0 { h + 360.0 } else { h };
     
     (h, s, v)
 }
 
-// HSV to RGB conversion
+// Optimized HSV to RGB conversion
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
-    let c = v * s;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let m = v - c;
+    if s == 0.0 {
+        return (v, v, v);
+    }
     
-    let (r_prime, g_prime, b_prime) = if h < 60.0 {
-        (c, x, 0.0)
-    } else if h < 120.0 {
-        (x, c, 0.0)
-    } else if h < 180.0 {
-        (0.0, c, x)
-    } else if h < 240.0 {
-        (0.0, x, c)
-    } else if h < 300.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
+    let h_sector = h / 60.0;
+    let sector = h_sector.floor() as i32;
+    let fractional = h_sector - sector as f32;
     
-    (r_prime + m, g_prime + m, b_prime + m)
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * fractional);
+    let t = v * (1.0 - s * (1.0 - fractional));
+    
+    match sector % 6 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    }
 }
 
 pub fn convert_image_to_ascii(
@@ -161,7 +158,7 @@ pub fn convert_image_to_ascii(
                 // Convert RGB to HSV for better color control
                 let (h, s, v) = rgb_to_hsv(r, g, b);
                 
-                // Enhanced saturation with smart boosting
+                // Enhanced saturation with smart boosting (optimized)
                 let saturation_boost = if v > 0.2 && v < 0.9 {
                     1.4
                 } else if v >= 0.9 {
@@ -171,13 +168,7 @@ pub fn convert_image_to_ascii(
                 };
                 
                 let enhanced_s = (s * saturation_boost).min(1.0);
-                
-                // Slight value adjustment
-                let enhanced_v = if v < 0.3 {
-                    (v * 1.15).min(1.0)
-                } else {
-                    v
-                };
+                let enhanced_v = if v < 0.3 { (v * 1.15).min(1.0) } else { v };
                 
                 // Convert back to RGB
                 let (final_r, final_g, final_b) = hsv_to_rgb(h, enhanced_s, enhanced_v);
@@ -202,49 +193,4 @@ pub fn convert_image_to_ascii(
         ascii_art: ascii_result,
         colored_ascii: colored_result,
     }
-}
-
-pub fn generate_preview(colored_ascii: &[Vec<(egui::Color32, char)>]) -> Option<egui::ColorImage> {
-    if colored_ascii.is_empty() {
-        return None;
-    }
-
-    let char_height = colored_ascii.len();
-    let char_width = colored_ascii[0].len();
-    
-    if char_width == 0 {
-        return None;
-    }
-
-    let preview_scale = 4;
-    let preview_width = char_width * preview_scale;
-    let preview_height = char_height * preview_scale;
-
-    let mut pixels = vec![0u8; preview_width * preview_height * 4];
-
-    for (y, row) in colored_ascii.iter().enumerate() {
-        for (x, (color, _ch)) in row.iter().enumerate() {
-            let rgb = color.to_array();
-            
-            for py in 0..preview_scale {
-                for px in 0..preview_scale {
-                    let pixel_x = x * preview_scale + px;
-                    let pixel_y = y * preview_scale + py;
-                    
-                    if pixel_x < preview_width && pixel_y < preview_height {
-                        let idx = (pixel_y * preview_width + pixel_x) * 4;
-                        pixels[idx] = rgb[0];
-                        pixels[idx + 1] = rgb[1];
-                        pixels[idx + 2] = rgb[2];
-                        pixels[idx + 3] = 255;
-                    }
-                }
-            }
-        }
-    }
-
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        [preview_width, preview_height],
-        &pixels,
-    ))
 }

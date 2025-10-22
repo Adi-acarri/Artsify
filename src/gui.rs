@@ -31,6 +31,12 @@ pub struct AsciiArtApp {
     save_type: SaveType,
     status_message: Option<(String, egui::Color32)>,
     show_original: bool,
+    // Caching for performance
+    cached_preview: Option<egui::TextureHandle>,
+    last_preview_settings: Option<(f32, bool)>, // (font_size, use_colors)
+    // Debouncing
+    pending_update: bool,
+    last_slider_change: Option<std::time::Instant>,
     // Icon textures
     icon_folder: Option<egui::TextureHandle>,
     icon_save: Option<egui::TextureHandle>,
@@ -61,6 +67,10 @@ impl Default for AsciiArtApp {
             save_type: SaveType::Image,
             status_message: None,
             show_original: false,
+            cached_preview: None,
+            last_preview_settings: None,
+            pending_update: false,
+            last_slider_change: None,
             icon_folder: None,
             icon_save: None,
             icon_text: None,
@@ -208,6 +218,9 @@ impl AsciiArtApp {
                 self.colored_ascii = result.colored_ascii;
                 self.processing = false;
                 self.result_receiver = None;
+                // Invalidate cache when new conversion completes
+                self.cached_preview = None;
+                self.last_preview_settings = None;
             }
         }
     }
@@ -270,6 +283,23 @@ impl AsciiArtApp {
             self.start_conversion();
         }
     }
+    
+    fn schedule_update(&mut self) {
+        self.pending_update = true;
+        self.last_slider_change = Some(std::time::Instant::now());
+    }
+    
+    fn check_pending_updates(&mut self) {
+        if self.pending_update {
+            if let Some(last_change) = self.last_slider_change {
+                // Debounce: wait 300ms after last change before updating
+                if last_change.elapsed().as_millis() > 300 {
+                    self.pending_update = false;
+                    self.update_conversion();
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for AsciiArtApp {
@@ -277,6 +307,7 @@ impl eframe::App for AsciiArtApp {
         self.check_conversion_result();
         self.check_file_dialog_result();
         self.check_save_dialog_result();
+        self.check_pending_updates();
 
         // Left sidebar
         egui::SidePanel::left("control_panel")
@@ -389,18 +420,21 @@ impl eframe::App for AsciiArtApp {
                                     
                                     ui.label("Brightness:");
                                     if ui.add(egui::Slider::new(&mut self.settings.brightness, 0.1..=2.0).step_by(0.1)).changed() {
-                                        self.update_conversion();
+                                        self.schedule_update();
                                     }
                                     
                                     ui.label("Contrast:");
                                     if ui.add(egui::Slider::new(&mut self.settings.contrast, 0.1..=2.0).step_by(0.1)).changed() {
-                                        self.update_conversion();
+                                        self.schedule_update();
                                     }
                                     
                                     ui.add_space(5.0);
                                     
                                     ui.label("Font Size:");
-                                    ui.add(egui::Slider::new(&mut self.settings.font_size, 6.0..=24.0).text("pt").step_by(1.0));
+                                    if ui.add(egui::Slider::new(&mut self.settings.font_size, 6.0..=24.0).text("pt").step_by(1.0)).changed() {
+                                        // Font size doesn't affect conversion, only preview
+                                        self.cached_preview = None;
+                                    }
                                 });
                             });
                         
@@ -470,25 +504,7 @@ impl eframe::App for AsciiArtApp {
                         
                         ui.add_space(10.0);
                         
-                        // Info Section
-                        if self.ascii_applied && !self.colored_ascii.is_empty() && !self.processing {
-                            let char_width = self.colored_ascii[0].len();
-                            let char_height = self.colored_ascii.len();
-                            let char_pixel_width = self.settings.font_size * 0.6;
-                            let char_pixel_height = self.settings.font_size * 1.2;
-                            let out_width = (char_width as f32 * char_pixel_width).ceil() as u32;
-                            let out_height = (char_height as f32 * char_pixel_height).ceil() as u32;
-                            
-                            egui::CollapsingHeader::new("ℹ Info")
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    ui.label(format!("ASCII: {} x {} chars", char_width, char_height));
-                                    ui.label(format!("Output: {} x {} px", out_width, out_height));
-                                });
-                        }
-                        
                         // Status
-                        ui.add_space(10.0);
                         if self.processing {
                             ui.horizontal(|ui| {
                                 ui.spinner();
@@ -535,34 +551,52 @@ impl eframe::App for AsciiArtApp {
                                 }));
                             }
                         } else if self.ascii_applied && !self.colored_ascii.is_empty() {
-                            // Show ASCII rendered
-                            match Self::render_ascii_to_image(&self.colored_ascii, self.settings.font_size, self.settings.use_colors) {
-                                Ok(img) => {
-                                    let size = [img.width() as usize, img.height() as usize];
-                                    let pixels = img.as_flat_samples();
-                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-                                    
-                                    let texture = ui.ctx().load_texture("ascii_rendered", color_image, egui::TextureOptions::default());
-                                    let available_size = ui.available_size();
-                                    let texture_size = texture.size_vec2();
-                                    let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(3.0).max(0.1);
-                                    let display_size = texture_size * scale;
-                                    
-                                    ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
-                                        id: texture.id(),
-                                        size: display_size,
-                                    }));
+                            // Show ASCII rendered with caching
+                            let preview_font_size = 8.0; // Smaller font for faster preview
+                            let current_settings = (preview_font_size, self.settings.use_colors);
+                            
+                            // Check if we need to regenerate the preview
+                            let needs_regenerate = self.cached_preview.is_none() || 
+                                                   self.last_preview_settings != Some(current_settings);
+                            
+                            if needs_regenerate {
+                                match Self::render_ascii_to_image(&self.colored_ascii, preview_font_size, self.settings.use_colors) {
+                                    Ok(img) => {
+                                        let size = [img.width() as usize, img.height() as usize];
+                                        let pixels = img.as_flat_samples();
+                                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                                        
+                                        self.cached_preview = Some(ui.ctx().load_texture(
+                                            "ascii_rendered", 
+                                            color_image, 
+                                            egui::TextureOptions::default()
+                                        ));
+                                        self.last_preview_settings = Some(current_settings);
+                                    }
+                                    Err(e) => {
+                                        ui.colored_label(egui::Color32::RED, format!("Preview error: {}", e));
+                                    }
                                 }
-                                Err(e) => {
-                                    ui.colored_label(egui::Color32::RED, format!("Preview error: {}", e));
-                                }
+                            }
+                            
+                            // Display cached preview
+                            if let Some(texture) = &self.cached_preview {
+                                let available_size = ui.available_size();
+                                let texture_size = texture.size_vec2();
+                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(3.0).max(0.1);
+                                let display_size = texture_size * scale;
+                                
+                                ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
+                                    id: texture.id(),
+                                    size: display_size,
+                                }));
                             }
                         }
                     });
             }
         });
 
-        if self.processing || self.file_dialog_receiver.is_some() || self.save_dialog_receiver.is_some() {
+        if self.processing || self.file_dialog_receiver.is_some() || self.save_dialog_receiver.is_some() || self.pending_update {
             ctx.request_repaint();
         }
     }
