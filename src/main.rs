@@ -1,4 +1,5 @@
 mod asciiconverter;
+mod ditherconverter;
 mod gui;
 
 use gui::AsciiArtApp;
@@ -13,7 +14,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "ASCII Art Converter",
+        "Artisfy",
         options,
         Box::new(|cc| Ok(Box::new(AsciiArtApp::new(cc)))),
     )
