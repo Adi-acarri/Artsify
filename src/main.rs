@@ -9,12 +9,12 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 1000.0])
             .with_min_inner_size([1000.0, 700.0])
-            .with_title("ASCII Art Converter"),
+            .with_title("Artsify"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Artisfy",
+        "Artsify",
         options,
         Box::new(|cc| Ok(Box::new(AsciiArtApp::new(cc)))),
     )

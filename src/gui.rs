@@ -26,8 +26,7 @@ pub struct AsciiArtApp {
     image_path: String,
     original_dimensions: (u32, u32),
     processing: bool,
-    ascii_applied: bool,
-    dither_applied: bool,
+    active_filter: ActiveFilter,
     dithered_image: Option<RgbaImage>,
     result_receiver: Option<mpsc::Receiver<ConversionResult>>,
     file_dialog_receiver: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -36,6 +35,8 @@ pub struct AsciiArtApp {
     show_original: bool,
     // Caching for performance
     cached_preview: Option<egui::TextureHandle>,
+    cached_original: Option<egui::TextureHandle>,
+    cached_dither: Option<egui::TextureHandle>,
     last_preview_settings: Option<(f32, bool)>,
     // Debouncing
     pending_update: bool,
@@ -45,6 +46,23 @@ pub struct AsciiArtApp {
     icon_save: Option<egui::TextureHandle>,
     icon_text: Option<egui::TextureHandle>,
     icon_copy: Option<egui::TextureHandle>,
+}
+
+#[derive(Clone, PartialEq)]
+enum ActiveFilter {
+    None,
+    Ascii,
+    Dither,
+}
+
+impl ActiveFilter {
+    fn name(&self) -> &str {
+        match self {
+            ActiveFilter::None => "None",
+            ActiveFilter::Ascii => "ASCII Art",
+            ActiveFilter::Dither => "Dither",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -64,8 +82,7 @@ impl Default for AsciiArtApp {
             image_path: String::new(),
             original_dimensions: (0, 0),
             processing: false,
-            ascii_applied: false,
-            dither_applied: false,
+            active_filter: ActiveFilter::None,
             dithered_image: None,
             result_receiver: None,
             file_dialog_receiver: None,
@@ -73,6 +90,8 @@ impl Default for AsciiArtApp {
             status_message: None,
             show_original: false,
             cached_preview: None,
+            cached_original: None,
+            cached_dither: None,
             last_preview_settings: None,
             pending_update: false,
             last_slider_change: None,
@@ -182,7 +201,7 @@ impl AsciiArtApp {
                 self.input_image = Some(img.clone());
                 self.image_path = path.to_string();
                 self.status_message = None;
-                self.ascii_applied = false;
+                self.active_filter = ActiveFilter::None;
                 self.ascii_art = String::new();
                 self.colored_ascii = Vec::new();
                 Ok(())
@@ -196,18 +215,25 @@ impl AsciiArtApp {
     }
 
     fn apply_ascii_filter(&mut self) {
-        self.ascii_applied = true;
-        self.dither_applied = false;
+        self.active_filter = ActiveFilter::Ascii;
         self.start_conversion();
     }
     
     fn apply_dither_filter(&mut self) {
         if let Some(image) = &self.input_image {
             self.dithered_image = Some(apply_dither(image.clone(), &self.dither_settings));
-            self.dither_applied = true;
-            self.ascii_applied = false;
-            self.cached_preview = None;
+            self.active_filter = ActiveFilter::Dither;
+            self.cached_dither = None; // Invalidate cache
         }
+    }
+    
+    fn remove_filter(&mut self) {
+        self.active_filter = ActiveFilter::None;
+        self.ascii_art = String::new();
+        self.colored_ascii = Vec::new();
+        self.dithered_image = None;
+        self.cached_preview = None;
+        self.cached_dither = None;
     }
 
     fn start_conversion(&mut self) {
@@ -265,7 +291,7 @@ impl AsciiArtApp {
     }
 
     fn update_conversion(&mut self) {
-        if !self.processing && self.ascii_applied {
+        if !self.processing && self.active_filter == ActiveFilter::Ascii {
             self.start_conversion();
         }
     }
@@ -299,7 +325,7 @@ impl eframe::App for AsciiArtApp {
             .default_width(300.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("ASCII Art Converter");
+                ui.heading("Artsify");
                 ui.add_space(10.0);
                 
                 egui::ScrollArea::vertical()
@@ -345,157 +371,182 @@ impl eframe::App for AsciiArtApp {
                         
                         ui.add_space(5.0);
                         
-                        // Filters Section
+                        // Filters Section with dropdown selector
                         ui.heading("🎨 Filters");
                         ui.add_space(5.0);
                         
-                        // ASCII Filter
-                        ui.push_id("ascii_filter", |ui| {
-                            egui::CollapsingHeader::new("ASCII Art")
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    let has_image = self.input_image.is_some();
-                                    
-                                    if ui.add_enabled(has_image && !self.processing, 
-                                        egui::Button::new(if self.ascii_applied { "✓ Applied" } else { "Apply Filter" })
-                                        .min_size(egui::vec2(ui.available_width(), 30.0)))
-                                        .clicked() {
-                                        self.apply_ascii_filter();
-                                    }
-                                    
-                                    if self.ascii_applied {
-                                        if ui.button("Remove Filter").clicked() {
-                                            self.ascii_applied = false;
-                                            self.ascii_art = String::new();
-                                            self.colored_ascii = Vec::new();
-                                        }
-                                    }
-                                    
-                                    ui.add_space(10.0);
-                                    
-                                    let enabled = self.ascii_applied;
-                                    
-                                    ui.add_enabled_ui(enabled, |ui| {
-                                        ui.label("Settings:");
-                                        ui.add_space(5.0);
-                                        
-                                        ui.horizontal(|ui| {
-                                            ui.label("Colors:");
-                                            if ui.checkbox(&mut self.settings.use_colors, "").changed() {
-                                                self.schedule_update();
-                                            }
-                                        });
-                                        
-                                        ui.add_space(5.0);
-                                        
-                                        ui.label("Detail Level:");
-                                        let current_detail = self.settings.detail_level.clone();
-                                        egui::ComboBox::from_id_salt("detail_level")
-                                            .selected_text(current_detail.name())
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Low, DetailLevel::Low.name());
-                                                ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Medium, DetailLevel::Medium.name());
-                                                ui.selectable_value(&mut self.settings.detail_level, DetailLevel::High, DetailLevel::High.name());
-                                                ui.selectable_value(&mut self.settings.detail_level, DetailLevel::VeryHigh, DetailLevel::VeryHigh.name());
-                                                ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Custom(100), "Custom");
+                        let has_image = self.input_image.is_some();
+                        
+                        // Filter selector
+                        ui.label("Select Filter:");
+                        let current_filter = self.active_filter.clone();
+                        egui::ComboBox::from_id_salt("filter_selector")
+                            .selected_text(current_filter.name())
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_value(&mut self.active_filter, ActiveFilter::None, ActiveFilter::None.name()).clicked() && has_image {
+                                    self.remove_filter();
+                                }
+                                if ui.selectable_value(&mut self.active_filter, ActiveFilter::Ascii, ActiveFilter::Ascii.name()).clicked() && has_image {
+                                    self.apply_ascii_filter();
+                                }
+                                if ui.selectable_value(&mut self.active_filter, ActiveFilter::Dither, ActiveFilter::Dither.name()).clicked() && has_image {
+                                    self.apply_dither_filter();
+                                }
+                            });
+                        
+                        ui.add_space(10.0);
+                        
+                        // Show settings for active filter
+                        match self.active_filter {
+                            ActiveFilter::Ascii => {
+                                ui.push_id("ascii_settings", |ui| {
+                                    egui::CollapsingHeader::new("ASCII Settings")
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Colors:");
+                                                if ui.checkbox(&mut self.settings.use_colors, "").changed() {
+                                                    self.schedule_update();
+                                                }
                                             });
-                                        
-                                        if let DetailLevel::Custom(width) = &mut self.settings.detail_level {
-                                            ui.add(egui::Slider::new(width, 50..=400).text("chars"));
-                                            if ui.button("Apply").clicked() {
+                                            
+                                            ui.add_space(5.0);
+                                            
+                                            ui.label("Detail Level:");
+                                            let current_detail = self.settings.detail_level.clone();
+                                            egui::ComboBox::from_id_salt("detail_level")
+                                                .selected_text(current_detail.name())
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Low, DetailLevel::Low.name());
+                                                    ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Medium, DetailLevel::Medium.name());
+                                                    ui.selectable_value(&mut self.settings.detail_level, DetailLevel::High, DetailLevel::High.name());
+                                                    ui.selectable_value(&mut self.settings.detail_level, DetailLevel::VeryHigh, DetailLevel::VeryHigh.name());
+                                                    ui.selectable_value(&mut self.settings.detail_level, DetailLevel::Custom(100), "Custom");
+                                                });
+                                            
+                                            if let DetailLevel::Custom(width) = &mut self.settings.detail_level {
+                                                ui.add(egui::Slider::new(width, 50..=400).text("chars"));
+                                                if ui.button("Apply").clicked() {
+                                                    self.update_conversion();
+                                                }
+                                            }
+                                            
+                                            if current_detail != self.settings.detail_level && !matches!(self.settings.detail_level, DetailLevel::Custom(_)) {
                                                 self.update_conversion();
                                             }
-                                        }
-                                        
-                                        if current_detail != self.settings.detail_level && !matches!(self.settings.detail_level, DetailLevel::Custom(_)) {
-                                            self.update_conversion();
-                                        }
-                                        
-                                        ui.add_space(5.0);
-                                        
-                                        ui.label("Brightness:");
-                                        if ui.add(egui::Slider::new(&mut self.settings.brightness, 0.1..=2.0).step_by(0.1)).changed() {
-                                            self.schedule_update();
-                                        }
-                                        
-                                        ui.label("Contrast:");
-                                        if ui.add(egui::Slider::new(&mut self.settings.contrast, 0.1..=2.0).step_by(0.1)).changed() {
-                                            self.schedule_update();
-                                        }
-                                        
-                                        ui.add_space(5.0);
-                                        
-                                        ui.label("Font Size:");
-                                        if ui.add(egui::Slider::new(&mut self.settings.font_size, 6.0..=24.0).text("pt").step_by(1.0)).changed() {
-                                            self.cached_preview = None;
-                                        }
-                                    });
+                                            
+                                            ui.add_space(5.0);
+                                            
+                                            ui.label("Brightness:");
+                                            if ui.add(egui::Slider::new(&mut self.settings.brightness, 0.1..=2.0).step_by(0.1)).changed() {
+                                                self.schedule_update();
+                                            }
+                                            
+                                            ui.label("Contrast:");
+                                            if ui.add(egui::Slider::new(&mut self.settings.contrast, 0.1..=2.0).step_by(0.1)).changed() {
+                                                self.schedule_update();
+                                            }
+                                            
+                                            ui.add_space(5.0);
+                                            
+                                            ui.label("Font Size:");
+                                            if ui.add(egui::Slider::new(&mut self.settings.font_size, 6.0..=24.0).text("pt").step_by(1.0)).changed() {
+                                                self.cached_preview = None;
+                                            }
+                                        });
                                 });
-                        });
-                        
-                        ui.add_space(5.0);
-                        
-                        // Placeholder for future filters
-                        ui.push_id("dither_filter", |ui| {
-                            egui::CollapsingHeader::new("Dither")
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    let has_image = self.input_image.is_some();
-                                    
-                                    if ui.add_enabled(has_image && !self.processing, 
-                                        egui::Button::new(if self.dither_applied { "✓ Applied" } else { "Apply Filter" })
-                                        .min_size(egui::vec2(ui.available_width(), 30.0)))
-                                        .clicked() {
-                                        self.apply_dither_filter();
-                                    }
-                                    
-                                    if self.dither_applied {
-                                        if ui.button("Remove Filter").clicked() {
-                                            self.dither_applied = false;
-                                            self.dithered_image = None;
-                                            self.cached_preview = None;
-                                        }
-                                    }
-                                    
-                                    ui.add_space(10.0);
-                                    
-                                    let enabled = self.dither_applied || has_image;
-                                    
-                                    ui.add_enabled_ui(enabled, |ui| {
-                                        ui.label("Settings:");
-                                        ui.add_space(5.0);
-                                        
-                                        ui.label("Algorithm:");
-                                        let current_algo = self.dither_settings.algorithm.clone();
-                                        egui::ComboBox::from_id_salt("dither_algorithm")
-                                            .selected_text(current_algo.name())
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::FloydSteinberg, DitherAlgorithm::FloydSteinberg.name());
-                                                ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::Atkinson, DitherAlgorithm::Atkinson.name());
-                                                ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::Ordered, DitherAlgorithm::Ordered.name());
-                                                ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::Threshold, DitherAlgorithm::Threshold.name());
+                            }
+                            ActiveFilter::Dither => {
+                                ui.push_id("dither_settings", |ui| {
+                                    egui::CollapsingHeader::new("Dither Settings")
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            ui.label("Algorithm:");
+                                            let current_algo = self.dither_settings.algorithm.clone();
+                                            egui::ComboBox::from_id_salt("dither_algorithm")
+                                                .selected_text(current_algo.name())
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::FloydSteinberg, DitherAlgorithm::FloydSteinberg.name());
+                                                    ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::Atkinson, DitherAlgorithm::Atkinson.name());
+                                                    ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::Ordered, DitherAlgorithm::Ordered.name());
+                                                    ui.selectable_value(&mut self.dither_settings.algorithm, DitherAlgorithm::Threshold, DitherAlgorithm::Threshold.name());
+                                                });
+                                            
+                                            if current_algo != self.dither_settings.algorithm {
+                                                self.apply_dither_filter();
+                                            }
+                                            
+                                            ui.add_space(5.0);
+                                            
+                                            if self.dither_settings.algorithm != DitherAlgorithm::Threshold {
+                                                ui.label("Color Levels:");
+                                                if ui.add(egui::Slider::new(&mut self.dither_settings.color_levels, 2..=16).text("levels")).changed() {
+                                                    self.apply_dither_filter();
+                                                }
+                                            } else {
+                                                ui.label("Threshold:");
+                                                if ui.add(egui::Slider::new(&mut self.dither_settings.threshold, 0.0..=255.0).text("value")).changed() {
+                                                    self.apply_dither_filter();
+                                                }
+                                            }
+                                            
+                                            ui.add_space(10.0);
+                                            ui.separator();
+                                            ui.label("Levels Adjustment:");
+                                            
+                                            ui.label("Black Point:");
+                                            if ui.add(egui::Slider::new(&mut self.dither_settings.black_point, 0.0..=255.0).text("input")).changed() {
+                                                self.apply_dither_filter();
+                                            }
+                                            
+                                            ui.label("White Point:");
+                                            if ui.add(egui::Slider::new(&mut self.dither_settings.white_point, 0.0..=255.0).text("input")).changed() {
+                                                self.apply_dither_filter();
+                                            }
+                                            
+                                            ui.add_space(10.0);
+                                            ui.separator();
+                                            ui.label("Custom Colors:");
+                                            
+                                            ui.horizontal(|ui| {
+                                                ui.label("Black:");
+                                                let mut black_color = egui::Color32::from_rgb(
+                                                    self.dither_settings.custom_black[0],
+                                                    self.dither_settings.custom_black[1],
+                                                    self.dither_settings.custom_black[2]
+                                                );
+                                                if ui.color_edit_button_srgba(&mut black_color).changed() {
+                                                    self.dither_settings.custom_black = [black_color.r(), black_color.g(), black_color.b()];
+                                                    self.apply_dither_filter();
+                                                }
                                             });
-                                        
-                                        if current_algo != self.dither_settings.algorithm && self.dither_applied {
-                                            self.apply_dither_filter();
-                                        }
-                                        
-                                        ui.add_space(5.0);
-                                        
-                                        if self.dither_settings.algorithm != DitherAlgorithm::Threshold {
-                                            ui.label("Color Levels:");
-                                            if ui.add(egui::Slider::new(&mut self.dither_settings.color_levels, 2..=16).text("levels")).changed() && self.dither_applied {
+                                            
+                                            ui.horizontal(|ui| {
+                                                ui.label("White:");
+                                                let mut white_color = egui::Color32::from_rgb(
+                                                    self.dither_settings.custom_white[0],
+                                                    self.dither_settings.custom_white[1],
+                                                    self.dither_settings.custom_white[2]
+                                                );
+                                                if ui.color_edit_button_srgba(&mut white_color).changed() {
+                                                    self.dither_settings.custom_white = [white_color.r(), white_color.g(), white_color.b()];
+                                                    self.apply_dither_filter();
+                                                }
+                                            });
+                                            
+                                            ui.add_space(5.0);
+                                            if ui.button("Reset to B&W").clicked() {
+                                                self.dither_settings.custom_black = [0, 0, 0];
+                                                self.dither_settings.custom_white = [255, 255, 255];
                                                 self.apply_dither_filter();
                                             }
-                                        } else {
-                                            ui.label("Threshold:");
-                                            if ui.add(egui::Slider::new(&mut self.dither_settings.threshold, 0.0..=255.0).text("value")).changed() && self.dither_applied {
-                                                self.apply_dither_filter();
-                                            }
-                                        }
-                                    });
+                                        });
                                 });
-                        });
+                            }
+                            ActiveFilter::None => {
+                                ui.label("Select a filter to begin");
+                            }
+                        }
                         
                         ui.add_space(5.0);
                         
@@ -515,8 +566,8 @@ impl eframe::App for AsciiArtApp {
                             egui::CollapsingHeader::new("💾 Export")
                                 .default_open(true)
                                 .show(ui, |ui| {
-                                    let can_save_ascii = self.save_dialog_receiver.is_none() && !self.colored_ascii.is_empty() && self.ascii_applied;
-                                    let can_save_dither = self.save_dialog_receiver.is_none() && self.dither_applied;
+                                    let can_save_ascii = self.save_dialog_receiver.is_none() && !self.colored_ascii.is_empty() && self.active_filter == ActiveFilter::Ascii;
+                                    let can_save_dither = self.save_dialog_receiver.is_none() && self.active_filter == ActiveFilter::Dither;
                                     let can_save = can_save_ascii || can_save_dither;
                                     
                                     ui.horizontal(|ui| {
@@ -524,7 +575,7 @@ impl eframe::App for AsciiArtApp {
                                             let (sender, receiver) = mpsc::channel();
                                             self.save_dialog_receiver = Some(receiver);
                                             
-                                            if self.dither_applied {
+                                            if self.active_filter == ActiveFilter::Dither {
                                                 // Save dithered image directly
                                                 let dithered = self.dithered_image.clone();
                                                 thread::spawn(move || {
@@ -622,42 +673,46 @@ impl eframe::App for AsciiArtApp {
                     .id_salt("preview_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.show_original || (!self.ascii_applied && !self.dither_applied) {
-                            if let Some(input_image) = &self.input_image {
-                                let rgba = input_image.to_rgba8();
-                                let size = [input_image.width() as usize, input_image.height() as usize];
-                                let pixels = rgba.as_flat_samples();
-                                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-                                
-                                let texture = ui.ctx().load_texture("original_image", color_image, egui::TextureOptions::default());
+                        if self.show_original || self.active_filter == ActiveFilter::None {
+                            // Cache original image texture
+                            if self.cached_original.is_none() {
+                                if let Some(input_image) = &self.input_image {
+                                    let rgba = input_image.to_rgba8();
+                                    let size = [input_image.width() as usize, input_image.height() as usize];
+                                    let pixels = rgba.as_flat_samples();
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                                    self.cached_original = Some(ui.ctx().load_texture("original_image", color_image, egui::TextureOptions::LINEAR));
+                                }
+                            }
+                            
+                            if let Some(texture) = &self.cached_original {
                                 let available_size = ui.available_size();
                                 let texture_size = texture.size_vec2();
-                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(3.0).max(0.1);
+                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(2.0).max(0.1);
                                 let display_size = texture_size * scale;
                                 
-                                ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
-                                    id: texture.id(),
-                                    size: display_size,
-                                }));
+                                ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
                             }
-                        } else if self.dither_applied {
-                            if let Some(dithered) = &self.dithered_image {
-                                let size = [dithered.width() as usize, dithered.height() as usize];
-                                let pixels = dithered.as_flat_samples();
-                                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-                                
-                                let texture = ui.ctx().load_texture("dithered_image", color_image, egui::TextureOptions::default());
+                        } else if self.active_filter == ActiveFilter::Dither {
+                            // Cache dithered texture
+                            if self.cached_dither.is_none() {
+                                if let Some(dithered) = &self.dithered_image {
+                                    let size = [dithered.width() as usize, dithered.height() as usize];
+                                    let pixels = dithered.as_flat_samples();
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                                    self.cached_dither = Some(ui.ctx().load_texture("dithered_image", color_image, egui::TextureOptions::NEAREST));
+                                }
+                            }
+                            
+                            if let Some(texture) = &self.cached_dither {
                                 let available_size = ui.available_size();
                                 let texture_size = texture.size_vec2();
-                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(3.0).max(0.1);
+                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(2.0).max(0.1);
                                 let display_size = texture_size * scale;
                                 
-                                ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
-                                    id: texture.id(),
-                                    size: display_size,
-                                }));
+                                ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
                             }
-                        } else if self.ascii_applied && !self.colored_ascii.is_empty() {
+                        } else if self.active_filter == ActiveFilter::Ascii && !self.colored_ascii.is_empty() {
                             let preview_font_size = 8.0;
                             let current_settings = (preview_font_size, self.settings.use_colors);
                             
@@ -674,7 +729,7 @@ impl eframe::App for AsciiArtApp {
                                         self.cached_preview = Some(ui.ctx().load_texture(
                                             "ascii_rendered", 
                                             color_image, 
-                                            egui::TextureOptions::default()
+                                            egui::TextureOptions::NEAREST
                                         ));
                                         self.last_preview_settings = Some(current_settings);
                                     }
@@ -687,13 +742,10 @@ impl eframe::App for AsciiArtApp {
                             if let Some(texture) = &self.cached_preview {
                                 let available_size = ui.available_size();
                                 let texture_size = texture.size_vec2();
-                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(3.0).max(0.1);
+                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(2.0).max(0.1);
                                 let display_size = texture_size * scale;
                                 
-                                ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
-                                    id: texture.id(),
-                                    size: display_size,
-                                }));
+                                ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
                             }
                         }
                     });
@@ -701,7 +753,7 @@ impl eframe::App for AsciiArtApp {
         });
         
         // Info overlay - drawn last so it's on top
-        if self.ascii_applied && !self.colored_ascii.is_empty() && !self.processing {
+        if self.active_filter == ActiveFilter::Ascii && !self.colored_ascii.is_empty() && !self.processing {
             let char_width = self.colored_ascii[0].len();
             let char_height = self.colored_ascii.len();
             let char_pixel_width = self.settings.font_size * 0.6;
