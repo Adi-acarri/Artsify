@@ -1,7 +1,7 @@
 [package]
-name = "ascii_art_gui"
-version = "0.1.2"
-edition = "2024"
+name = "pixforge"
+version = "0.1.3"
+edition = "2021"
 
 [dependencies]
 eframe = "0.29"
@@ -10,3 +10,12 @@ image = "0.25"
 imageproc = "0.25"
 ab_glyph = "0.2"
 rfd = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1

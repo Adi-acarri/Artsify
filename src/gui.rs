@@ -8,6 +8,7 @@ use std::thread;
 
 use crate::asciiconverter::{AsciiSettings, DetailLevel, ConversionResult, convert_image_to_ascii};
 use crate::ditherconverter::{DitherSettings, DitherAlgorithm, apply_dither};
+use crate::fisheyeconverter::{FisheyeSettings, apply_fisheye};
 
 const FONT_DATA: &[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");
 
@@ -23,11 +24,13 @@ pub struct AsciiArtApp {
     colored_ascii: Vec<Vec<(egui::Color32, char)>>,
     pub settings: AsciiSettings,
     pub dither_settings: DitherSettings,
+    pub fisheye_settings: FisheyeSettings,
     image_path: String,
     original_dimensions: (u32, u32),
     processing: bool,
     active_filter: ActiveFilter,
     dithered_image: Option<RgbaImage>,
+    fisheye_image: Option<RgbaImage>,
     result_receiver: Option<mpsc::Receiver<ConversionResult>>,
     file_dialog_receiver: Option<mpsc::Receiver<Option<PathBuf>>>,
     save_dialog_receiver: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -37,6 +40,7 @@ pub struct AsciiArtApp {
     cached_preview: Option<egui::TextureHandle>,
     cached_original: Option<egui::TextureHandle>,
     cached_dither: Option<egui::TextureHandle>,
+    cached_fisheye: Option<egui::TextureHandle>,
     last_preview_settings: Option<(f32, bool)>,
     // Debouncing
     pending_update: bool,
@@ -46,6 +50,8 @@ pub struct AsciiArtApp {
     icon_save: Option<egui::TextureHandle>,
     icon_text: Option<egui::TextureHandle>,
     icon_copy: Option<egui::TextureHandle>,
+    // Fisheye center dragging
+    dragging_fisheye_center: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -53,6 +59,7 @@ enum ActiveFilter {
     None,
     Ascii,
     Dither,
+    Fisheye,
 }
 
 impl ActiveFilter {
@@ -61,6 +68,7 @@ impl ActiveFilter {
             ActiveFilter::None => "None",
             ActiveFilter::Ascii => "ASCII Art",
             ActiveFilter::Dither => "Dither",
+            ActiveFilter::Fisheye => "Fisheye",
         }
     }
 }
@@ -79,11 +87,13 @@ impl Default for AsciiArtApp {
             colored_ascii: Vec::new(),
             settings: AsciiSettings::default(),
             dither_settings: DitherSettings::default(),
+            fisheye_settings: FisheyeSettings::default(),
             image_path: String::new(),
             original_dimensions: (0, 0),
             processing: false,
             active_filter: ActiveFilter::None,
             dithered_image: None,
+            fisheye_image: None,
             result_receiver: None,
             file_dialog_receiver: None,
             save_dialog_receiver: None,
@@ -92,6 +102,7 @@ impl Default for AsciiArtApp {
             cached_preview: None,
             cached_original: None,
             cached_dither: None,
+            cached_fisheye: None,
             last_preview_settings: None,
             pending_update: false,
             last_slider_change: None,
@@ -99,6 +110,7 @@ impl Default for AsciiArtApp {
             icon_save: None,
             icon_text: None,
             icon_copy: None,
+            dragging_fisheye_center: false,
         }
     }
 }
@@ -198,12 +210,23 @@ impl AsciiArtApp {
         match image::open(path) {
             Ok(img) => {
                 self.original_dimensions = img.dimensions();
-                self.input_image = Some(img.clone());
+                
+                // Only store RGB8 to save memory
+                let rgb_img = img.to_rgb8();
+                self.input_image = Some(DynamicImage::ImageRgb8(rgb_img));
+                
                 self.image_path = path.to_string();
                 self.status_message = None;
                 self.active_filter = ActiveFilter::None;
                 self.ascii_art = String::new();
                 self.colored_ascii = Vec::new();
+                
+                // Clear all caches
+                self.cached_original = None;
+                self.cached_preview = None;
+                self.cached_dither = None;
+                self.cached_fisheye = None;
+                
                 Ok(())
             }
             Err(e) => {
@@ -223,7 +246,15 @@ impl AsciiArtApp {
         if let Some(image) = &self.input_image {
             self.dithered_image = Some(apply_dither(image.clone(), &self.dither_settings));
             self.active_filter = ActiveFilter::Dither;
-            self.cached_dither = None; // Invalidate cache
+            self.cached_dither = None;
+        }
+    }
+    
+    fn apply_fisheye_filter(&mut self) {
+        if let Some(image) = &self.input_image {
+            self.fisheye_image = Some(apply_fisheye(image.clone(), &self.fisheye_settings));
+            self.active_filter = ActiveFilter::Fisheye;
+            self.cached_fisheye = None;
         }
     }
     
@@ -232,8 +263,10 @@ impl AsciiArtApp {
         self.ascii_art = String::new();
         self.colored_ascii = Vec::new();
         self.dithered_image = None;
+        self.fisheye_image = None;
         self.cached_preview = None;
         self.cached_dither = None;
+        self.cached_fisheye = None;
     }
 
     fn start_conversion(&mut self) {
@@ -325,7 +358,7 @@ impl eframe::App for AsciiArtApp {
             .default_width(300.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("Artsify");
+                ui.heading("PixForge");
                 ui.add_space(10.0);
                 
                 egui::ScrollArea::vertical()
@@ -391,6 +424,9 @@ impl eframe::App for AsciiArtApp {
                                 }
                                 if ui.selectable_value(&mut self.active_filter, ActiveFilter::Dither, ActiveFilter::Dither.name()).clicked() && has_image {
                                     self.apply_dither_filter();
+                                }
+                                if ui.selectable_value(&mut self.active_filter, ActiveFilter::Fisheye, ActiveFilter::Fisheye.name()).clicked() && has_image {
+                                    self.apply_fisheye_filter();
                                 }
                             });
                         
@@ -543,6 +579,63 @@ impl eframe::App for AsciiArtApp {
                                         });
                                 });
                             }
+                            ActiveFilter::Fisheye => {
+                                ui.push_id("fisheye_settings", |ui| {
+                                    egui::CollapsingHeader::new("Fisheye Settings")
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            ui.label("Strength:");
+                                            if ui.add(egui::Slider::new(&mut self.fisheye_settings.strength, -0.9..=0.9)
+                                                .text("distortion")
+                                                .step_by(0.05))
+                                                .on_hover_text("Positive = barrel (fisheye), Negative = pincushion")
+                                                .changed() {
+                                                self.apply_fisheye_filter();
+                                            }
+                                            
+                                            ui.add_space(5.0);
+                                            
+                                            ui.label("Zoom:");
+                                            if ui.add(egui::Slider::new(&mut self.fisheye_settings.zoom, 0.5..=2.0)
+                                                .text("scale")
+                                                .step_by(0.05))
+                                                .changed() {
+                                                self.apply_fisheye_filter();
+                                            }
+                                            
+                                            ui.add_space(10.0);
+                                            ui.separator();
+                                            ui.label("Center Point:");
+                                            
+                                            ui.horizontal(|ui| {
+                                                ui.label("X:");
+                                                if ui.add(egui::Slider::new(&mut self.fisheye_settings.center_x, 0.0..=1.0)
+                                                    .text("position")
+                                                    .step_by(0.01))
+                                                    .changed() {
+                                                    self.apply_fisheye_filter();
+                                                }
+                                            });
+                                            
+                                            ui.horizontal(|ui| {
+                                                ui.label("Y:");
+                                                if ui.add(egui::Slider::new(&mut self.fisheye_settings.center_y, 0.0..=1.0)
+                                                    .text("position")
+                                                    .step_by(0.01))
+                                                    .changed() {
+                                                    self.apply_fisheye_filter();
+                                                }
+                                            });
+                                            
+                                            ui.add_space(5.0);
+                                            if ui.button("Reset Center").clicked() {
+                                                self.fisheye_settings.center_x = 0.5;
+                                                self.fisheye_settings.center_y = 0.5;
+                                                self.apply_fisheye_filter();
+                                            }
+                                        });
+                                });
+                            }
                             ActiveFilter::None => {
                                 ui.label("Select a filter to begin");
                             }
@@ -568,7 +661,8 @@ impl eframe::App for AsciiArtApp {
                                 .show(ui, |ui| {
                                     let can_save_ascii = self.save_dialog_receiver.is_none() && !self.colored_ascii.is_empty() && self.active_filter == ActiveFilter::Ascii;
                                     let can_save_dither = self.save_dialog_receiver.is_none() && self.active_filter == ActiveFilter::Dither;
-                                    let can_save = can_save_ascii || can_save_dither;
+                                    let can_save_fisheye = self.save_dialog_receiver.is_none() && self.active_filter == ActiveFilter::Fisheye;
+                                    let can_save = can_save_ascii || can_save_dither || can_save_fisheye;
                                     
                                     ui.horizontal(|ui| {
                                         if ui.add_enabled(can_save, egui::Button::new("Image")).on_hover_text("Save as PNG/JPEG").clicked() {
@@ -585,6 +679,21 @@ impl eframe::App for AsciiArtApp {
                                                         .set_file_name("dithered.png")
                                                         .save_file() {
                                                         if let Some(img) = dithered {
+                                                            let _ = img.save(&path);
+                                                        }
+                                                    }
+                                                    let _ = sender.send(None);
+                                                });
+                                            } else if self.active_filter == ActiveFilter::Fisheye {
+                                                // Save fisheye image directly
+                                                let fisheye = self.fisheye_image.clone();
+                                                thread::spawn(move || {
+                                                    if let Some(path) = rfd::FileDialog::new()
+                                                        .add_filter("PNG", &["png"])
+                                                        .add_filter("JPEG", &["jpg", "jpeg"])
+                                                        .set_file_name("fisheye.png")
+                                                        .save_file() {
+                                                        if let Some(img) = fisheye {
                                                             let _ = img.save(&path);
                                                         }
                                                     }
@@ -622,7 +731,7 @@ impl eframe::App for AsciiArtApp {
                                                     .save_file() {
                                                     let _ = std::fs::write(&path, &ascii_art);
                                                 }
-                                                                                                    let _ = sender.send(None);
+                                                let _ = sender.send(None);
                                             });
                                         }
 
@@ -674,11 +783,21 @@ impl eframe::App for AsciiArtApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if self.show_original || self.active_filter == ActiveFilter::None {
-                            // Cache original image texture
+                            // Cache original image texture - only create once
                             if self.cached_original.is_none() {
                                 if let Some(input_image) = &self.input_image {
-                                    let rgba = input_image.to_rgba8();
-                                    let size = [input_image.width() as usize, input_image.height() as usize];
+                                    // Limit preview size for performance
+                                    let (img_w, img_h) = input_image.dimensions();
+                                    let max_preview = 2048;
+                                    
+                                    let preview_img = if img_w > max_preview || img_h > max_preview {
+                                        input_image.resize(max_preview, max_preview, image::imageops::FilterType::Triangle)
+                                    } else {
+                                        input_image.clone()
+                                    };
+                                    
+                                    let rgba = preview_img.to_rgba8();
+                                    let size = [preview_img.width() as usize, preview_img.height() as usize];
                                     let pixels = rgba.as_flat_samples();
                                     let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
                                     self.cached_original = Some(ui.ctx().load_texture("original_image", color_image, egui::TextureOptions::LINEAR));
@@ -711,6 +830,81 @@ impl eframe::App for AsciiArtApp {
                                 let display_size = texture_size * scale;
                                 
                                 ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
+                            }
+                        } else if self.active_filter == ActiveFilter::Fisheye {
+                            // Cache fisheye texture
+                            if self.cached_fisheye.is_none() {
+                                if let Some(fisheye) = &self.fisheye_image {
+                                    let size = [fisheye.width() as usize, fisheye.height() as usize];
+                                    let pixels = fisheye.as_flat_samples();
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                                    self.cached_fisheye = Some(ui.ctx().load_texture("fisheye_image", color_image, egui::TextureOptions::LINEAR));
+                                }
+                            }
+                            
+                            if let Some(texture) = &self.cached_fisheye {
+                                let available_size = ui.available_size();
+                                let texture_size = texture.size_vec2();
+                                let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(2.0).max(0.1);
+                                let display_size = texture_size * scale;
+                                
+                                let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
+                                
+                                // Draw the image
+                                ui.put(rect, egui::Image::new(egui::ImageSource::Texture(egui::load::SizedTexture::new(texture.id(), display_size))));
+                                
+                                // Calculate center position on screen
+                                let center_x = rect.min.x + display_size.x * self.fisheye_settings.center_x;
+                                let center_y = rect.min.y + display_size.y * self.fisheye_settings.center_y;
+                                let center_pos = egui::pos2(center_x, center_y);
+                                
+                                // Draw crosshair
+                                let painter = ui.painter();
+                                let cross_size = 20.0;
+                                let cross_color = egui::Color32::from_rgba_premultiplied(0, 0, 0, 200);
+                                let cross_thickness = 2.0;
+                                let cross_thickness = 2.0;
+                                
+                                // Horizontal line
+                                painter.line_segment(
+                                    [egui::pos2(center_pos.x - cross_size, center_pos.y), 
+                                     egui::pos2(center_pos.x + cross_size, center_pos.y)],
+                                    egui::Stroke::new(cross_thickness, cross_color)
+                                );
+                                
+                                // Vertical line
+                                painter.line_segment(
+                                    [egui::pos2(center_pos.x, center_pos.y - cross_size), 
+                                     egui::pos2(center_pos.x, center_pos.y + cross_size)],
+                                    egui::Stroke::new(cross_thickness, cross_color)
+                                );
+                                
+                                // Circle at center
+                                painter.circle_stroke(
+                                    center_pos,
+                                    5.0,
+                                    egui::Stroke::new(cross_thickness, cross_color)
+                                );
+                                
+                                // Handle dragging
+                                if response.dragged() || response.clicked() {
+                                    if let Some(mouse_pos) = response.interact_pointer_pos() {
+                                        // Convert mouse position to normalized coordinates
+                                        let new_x = ((mouse_pos.x - rect.min.x) / display_size.x).clamp(0.0, 1.0);
+                                        let new_y = ((mouse_pos.y - rect.min.y) / display_size.y).clamp(0.0, 1.0);
+                                        
+                                        if new_x != self.fisheye_settings.center_x || new_y != self.fisheye_settings.center_y {
+                                            self.fisheye_settings.center_x = new_x;
+                                            self.fisheye_settings.center_y = new_y;
+                                            self.apply_fisheye_filter();
+                                        }
+                                    }
+                                }
+                                
+                                // Show hover cursor
+                                if response.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                                }
                             }
                         } else if self.active_filter == ActiveFilter::Ascii && !self.colored_ascii.is_empty() {
                             let preview_font_size = 8.0;
