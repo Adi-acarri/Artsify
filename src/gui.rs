@@ -50,8 +50,6 @@ pub struct AsciiArtApp {
     icon_save: Option<egui::TextureHandle>,
     icon_text: Option<egui::TextureHandle>,
     icon_copy: Option<egui::TextureHandle>,
-    // Fisheye center dragging
-    dragging_fisheye_center: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -71,12 +69,6 @@ impl ActiveFilter {
             ActiveFilter::Fisheye => "Fisheye",
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum SaveType {
-    Image,
-    Text,
 }
 
 impl Default for AsciiArtApp {
@@ -110,7 +102,6 @@ impl Default for AsciiArtApp {
             icon_save: None,
             icon_text: None,
             icon_copy: None,
-            dragging_fisheye_center: false,
         }
     }
 }
@@ -861,29 +852,27 @@ impl eframe::App for AsciiArtApp {
                                 // Draw crosshair
                                 let painter = ui.painter();
                                 let cross_size = 20.0;
-                                let cross_color = egui::Color32::from_rgba_premultiplied(0, 0, 0, 200);
-                                let cross_thickness = 2.0;
-                                let cross_thickness = 2.0;
+                                let cross_color = egui::Color32::BLACK;
                                 
                                 // Horizontal line
                                 painter.line_segment(
                                     [egui::pos2(center_pos.x - cross_size, center_pos.y), 
                                      egui::pos2(center_pos.x + cross_size, center_pos.y)],
-                                    egui::Stroke::new(cross_thickness, cross_color)
+                                    egui::Stroke::new(2.0, cross_color)
                                 );
                                 
                                 // Vertical line
                                 painter.line_segment(
                                     [egui::pos2(center_pos.x, center_pos.y - cross_size), 
                                      egui::pos2(center_pos.x, center_pos.y + cross_size)],
-                                    egui::Stroke::new(cross_thickness, cross_color)
+                                    egui::Stroke::new(2.0, cross_color)
                                 );
                                 
-                                // Circle at center
+                                // Circle at center (outline only)
                                 painter.circle_stroke(
                                     center_pos,
                                     5.0,
-                                    egui::Stroke::new(cross_thickness, cross_color)
+                                    egui::Stroke::new(2.0, cross_color)
                                 );
                                 
                                 // Handle dragging
