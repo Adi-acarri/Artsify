@@ -1,6 +1,7 @@
 mod asciiconverter;
 mod ditherconverter;
 mod fisheyeconverter;
+mod crtconverter;
 mod gui;
 
 use gui::AsciiArtApp;
