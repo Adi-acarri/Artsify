@@ -40,6 +40,7 @@ pub struct AsciiArtApp {
     last_preview_settings: Option<(f32, bool)>,
     pending_update: bool,
     last_slider_change: Option<std::time::Instant>,
+    zoom_level: f32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -93,6 +94,7 @@ impl Default for AsciiArtApp {
             last_preview_settings: None,
             pending_update: false,
             last_slider_change: None,
+            zoom_level: 1.0,
         }
     }
 }
@@ -534,6 +536,136 @@ impl eframe::App for AsciiArtApp {
         egui::SidePanel::left("control_panel").default_width(300.0).resizable(true).show(ctx, |ui| {
             ui.heading("Filter Settings");
             ui.add_space(10.0);
+            
+            // Action buttons at top - full width
+            ui.horizontal(|ui| {
+                let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                
+                if ui.add_sized([button_width, 40.0], egui::Button::new("Import")).clicked() && !self.processing && self.file_dialog_receiver.is_none() {
+                    let (sender, receiver) = mpsc::channel();
+                    self.file_dialog_receiver = Some(receiver);
+                    thread::spawn(move || {
+                        let result = rfd::FileDialog::new()
+                            .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
+                            .pick_file();
+                        let _ = sender.send(result);
+                    });
+                }
+                
+                let can_export = self.input_image.is_some() && self.save_dialog_receiver.is_none();
+                if ui.add_enabled_ui(can_export, |ui| {
+                    ui.add_sized([button_width, 40.0], egui::Button::new("Export"))
+                }).inner.clicked() {
+                    let (sender, receiver) = mpsc::channel();
+                    self.save_dialog_receiver = Some(receiver);
+                    
+                    if self.active_filter == ActiveFilter::Dither {
+                        let dithered = self.dithered_image.clone();
+                        thread::spawn(move || {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("PNG", &["png"])
+                                .add_filter("JPEG", &["jpg", "jpeg"])
+                                .set_file_name("output.png")
+                                .save_file() {
+                                if let Some(img) = dithered {
+                                    let _ = img.save(&path);
+                                }
+                            }
+                            let _ = sender.send(None);
+                        });
+                    } else if self.active_filter == ActiveFilter::Fisheye {
+                        let fisheye = self.fisheye_image.clone();
+                        thread::spawn(move || {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("PNG", &["png"])
+                                .add_filter("JPEG", &["jpg", "jpeg"])
+                                .set_file_name("output.png")
+                                .save_file() {
+                                if let Some(img) = fisheye {
+                                    let _ = img.save(&path);
+                                }
+                            }
+                            let _ = sender.send(None);
+                        });
+                    } else if self.active_filter == ActiveFilter::Crt {
+                        let crt = self.crt_image.clone();
+                        thread::spawn(move || {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("PNG", &["png"])
+                                .add_filter("JPEG", &["jpg", "jpeg"])
+                                .set_file_name("output.png")
+                                .save_file() {
+                                if let Some(img) = crt {
+                                    let _ = img.save(&path);
+                                }
+                            }
+                            let _ = sender.send(None);
+                        });
+                    } else if self.active_filter == ActiveFilter::Ascii && !self.colored_ascii.is_empty() {
+                        let colored_ascii = self.colored_ascii.clone();
+                        let font_size = self.settings.font_size;
+                        let use_colors = self.settings.use_colors;
+                        thread::spawn(move || {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("PNG", &["png"])
+                                .add_filter("JPEG", &["jpg", "jpeg"])
+                                .set_file_name("ascii_art.png")
+                                .save_file() {
+                                let _ = Self::render_ascii_to_image(&colored_ascii, font_size, use_colors)
+                                    .and_then(|img| img.save(&path).map_err(|e| e.to_string()));
+                            }
+                            let _ = sender.send(None);
+                        });
+                    }
+                }
+            });
+            
+            ui.add_space(5.0);
+            
+            // Zoom buttons
+            ui.horizontal(|ui| {
+                let button_width = (ui.available_width() - ui.spacing().item_spacing.x * 2.0) / 3.0;
+                
+                if ui.add_sized([button_width, 40.0], egui::Button::new("Zoom In")).clicked() {
+                    self.zoom_level = (self.zoom_level * 1.2).min(5.0);
+                }
+                if ui.add_sized([button_width, 40.0], egui::Button::new("Zoom Out")).clicked() {
+                    self.zoom_level = (self.zoom_level / 1.2).max(0.1);
+                }
+                if ui.add_sized([button_width, 40.0], egui::Button::new("Reset Zoom")).clicked() {
+                    self.zoom_level = 1.0;
+                }
+            });
+            
+            ui.add_space(10.0);
+            
+            // Filter dropdown
+            ui.label("Filter:");
+            let has_image = self.input_image.is_some();
+            let current_filter = self.active_filter.clone();
+            egui::ComboBox::from_id_salt("filter_selector")
+                .selected_text(current_filter.name())
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    if ui.add_enabled(has_image, egui::SelectableLabel::new(self.active_filter == ActiveFilter::None, "None")).clicked() {
+                        self.remove_filter();
+                    }
+                    if ui.add_enabled(has_image, egui::SelectableLabel::new(self.active_filter == ActiveFilter::Ascii, "ASCII Art")).clicked() {
+                        self.apply_ascii_filter();
+                    }
+                    if ui.add_enabled(has_image, egui::SelectableLabel::new(self.active_filter == ActiveFilter::Dither, "Dither")).clicked() {
+                        self.apply_dither_filter();
+                    }
+                    if ui.add_enabled(has_image, egui::SelectableLabel::new(self.active_filter == ActiveFilter::Fisheye, "Fisheye")).clicked() {
+                        self.apply_fisheye_filter();
+                    }
+                    if ui.add_enabled(has_image, egui::SelectableLabel::new(self.active_filter == ActiveFilter::Crt, "CRT Monitor")).clicked() {
+                        self.apply_crt_filter();
+                    }
+                });
+            
+            ui.add_space(15.0);
+            
             egui::ScrollArea::vertical().id_salt("sidebar_scroll").show(ui, |ui| {
                 match self.active_filter {
                     ActiveFilter::Ascii => {
@@ -603,57 +735,57 @@ impl eframe::App for AsciiArtApp {
                             ui.add_space(5.0);
                             if self.dither_settings.algorithm != DitherAlgorithm::Threshold {
                                 ui.label("Color Levels:");
-                                if ui.add(egui::Slider::new(&mut self.dither_settings.color_levels, 2..=16).text("levels")).changed() {
+                                let mut levels = self.dither_settings.color_levels as i32;
+                                if ui.add(egui::Slider::new(&mut levels, 2..=16).text("levels")).changed() {
+                                    self.dither_settings.color_levels = levels as u8;
                                     self.apply_dither_filter();
                                 }
                             } else {
                                 ui.label("Threshold:");
-                                if ui.add(egui::Slider::new(&mut self.dither_settings.threshold, 0.0..=255.0).text("value")).changed() {
+                                let mut thresh = self.dither_settings.threshold as i32;
+                                if ui.add(egui::Slider::new(&mut thresh, 0..=255).text("value")).changed() {
+                                    self.dither_settings.threshold = thresh as f32;
                                     self.apply_dither_filter();
                                 }
                             }
                             ui.add_space(10.0);
                             ui.separator();
-                            ui.label("Levels Adjustment:");
-                            ui.label("Black Point:");
-                            if ui.add(egui::Slider::new(&mut self.dither_settings.black_point, 0.0..=255.0).text("input")).changed() {
+                            ui.label("Tone Adjustments:");
+                            
+                            ui.label("Contrast:");
+                            let mut contrast_int = (self.dither_settings.contrast * 100.0) as i32;
+                            if ui.add(egui::Slider::new(&mut contrast_int, 50..=200).text("%")).changed() {
+                                self.dither_settings.contrast = contrast_int as f32 / 100.0;
                                 self.apply_dither_filter();
                             }
-                            ui.label("White Point:");
-                            if ui.add(egui::Slider::new(&mut self.dither_settings.white_point, 0.0..=255.0).text("input")).changed() {
+                            
+                            ui.label("Midtones:");
+                            let mut midtones_int = (self.dither_settings.midtones * 100.0) as i32;
+                            if ui.add(egui::Slider::new(&mut midtones_int, -100..=100).text("shift")).changed() {
+                                self.dither_settings.midtones = midtones_int as f32 / 100.0;
                                 self.apply_dither_filter();
                             }
+                            
+                            ui.label("Highlights:");
+                            let mut highlights_int = (self.dither_settings.highlights * 100.0) as i32;
+                            if ui.add(egui::Slider::new(&mut highlights_int, 50..=150).text("%")).changed() {
+                                self.dither_settings.highlights = highlights_int as f32 / 100.0;
+                                self.apply_dither_filter();
+                            }
+                            
+                            ui.label("Luminance Threshold:");
+                            let mut lum = self.dither_settings.luminance_threshold as i32;
+                            if ui.add(egui::Slider::new(&mut lum, 0..=255).text("level")).changed() {
+                                self.dither_settings.luminance_threshold = lum as f32;
+                                self.apply_dither_filter();
+                            }
+                            
                             ui.add_space(10.0);
                             ui.separator();
-                            ui.label("Custom Colors:");
-                            ui.horizontal(|ui| {
-                                ui.label("Black:");
-                                let mut black_color = egui::Color32::from_rgb(
-                                    self.dither_settings.custom_black[0],
-                                    self.dither_settings.custom_black[1],
-                                    self.dither_settings.custom_black[2]
-                                );
-                                if ui.color_edit_button_srgba(&mut black_color).changed() {
-                                    self.dither_settings.custom_black = [black_color.r(), black_color.g(), black_color.b()];
-                                    self.apply_dither_filter();
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("White:");
-                                let mut white_color = egui::Color32::from_rgb(
-                                    self.dither_settings.custom_white[0],
-                                    self.dither_settings.custom_white[1],
-                                    self.dither_settings.custom_white[2]
-                                );
-                                if ui.color_edit_button_srgba(&mut white_color).changed() {
-                                    self.dither_settings.custom_white = [white_color.r(), white_color.g(), white_color.b()];
-                                    self.apply_dither_filter();
-                                }
-                            });
-                            ui.add_space(5.0);
-                            if ui.button("Reset to B&W").clicked() {
-                                self.dither_settings.custom_black = [0, 0, 0];
-                                self.dither_settings.custom_white = [255, 255, 255];
+                            ui.label("Blur:");
+                            let mut blur_val = self.dither_settings.blur as i32;
+                            if ui.add(egui::Slider::new(&mut blur_val, 0..=5).text("amount")).changed() {
+                                self.dither_settings.blur = blur_val as f32;
                                 self.apply_dither_filter();
                             }
                         });
@@ -785,10 +917,8 @@ impl eframe::App for AsciiArtApp {
                             }
                         }
                         if let Some(texture) = &self.cached_original {
-                            let available_size = ui.available_size();
                             let texture_size = texture.size_vec2();
-                            let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(2.0).max(0.1);
-                            let display_size = texture_size * scale;
+                            let display_size = texture_size * self.zoom_level;
                             ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
                         }
                     } else if self.active_filter == ActiveFilter::Dither {
@@ -801,10 +931,8 @@ impl eframe::App for AsciiArtApp {
                             }
                         }
                         if let Some(texture) = &self.cached_dither {
-                            let available_size = ui.available_size();
                             let texture_size = texture.size_vec2();
-                            let scale = (available_size.x / texture_size.x).min(available_size.y / texture_size.y).min(2.0).max(0.1);
-                            let display_size = texture_size * scale;
+                            let display_size = texture_size * self.zoom_level;
                             ui.image(egui::load::SizedTexture::new(texture.id(), display_size));
                         }
                     } else if self.active_filter == ActiveFilter::Fisheye {

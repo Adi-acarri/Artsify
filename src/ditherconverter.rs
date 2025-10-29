@@ -5,10 +5,11 @@ pub struct DitherSettings {
     pub algorithm: DitherAlgorithm,
     pub color_levels: u8,
     pub threshold: f32,
-    pub black_point: f32,
-    pub white_point: f32,
-    pub custom_black: [u8; 3],
-    pub custom_white: [u8; 3],
+    pub contrast: f32,
+    pub midtones: f32,
+    pub highlights: f32,
+    pub luminance_threshold: f32,
+    pub blur: f32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -52,10 +53,11 @@ impl Default for DitherSettings {
             algorithm: DitherAlgorithm::FloydSteinberg,
             color_levels: 2,
             threshold: 128.0,
-            black_point: 0.0,
-            white_point: 255.0,
-            custom_black: [0, 0, 0],
-            custom_white: [255, 255, 255],
+            contrast: 1.0,
+            midtones: 0.0,
+            highlights: 1.0,
+            luminance_threshold: 128.0,
+            blur: 0.0,
         }
     }
 }
@@ -65,14 +67,36 @@ pub fn apply_dither(image: DynamicImage, settings: &DitherSettings) -> RgbaImage
     let (width, height) = gray_img.dimensions();
     let mut img = RgbaImage::new(width, height);
     
-    let range = settings.white_point - settings.black_point;
-    let scale = 255.0 / range;
+    let processed_img = if settings.blur > 0.0 {
+        image::imageops::blur(&gray_img, settings.blur)
+    } else {
+        gray_img.clone()
+    };
     
     for y in 0..height {
         for x in 0..width {
-            let gray = gray_img.get_pixel(x, y)[0] as f32;
-            let adjusted = ((gray - settings.black_point) * scale).clamp(0.0, 255.0) as u8;
-            img.put_pixel(x, y, Rgba([adjusted, adjusted, adjusted, 255]));
+            let gray = processed_img.get_pixel(x, y)[0] as f32 / 255.0;
+            let contrasted = ((gray - 0.5) * settings.contrast + 0.5).clamp(0.0, 1.0);
+            
+            let midtone_adjusted = if contrasted < 0.5 {
+                contrasted * (1.0 + settings.midtones)
+            } else {
+                contrasted + (1.0 - contrasted) * settings.midtones
+            };
+            
+            let highlight_adjusted = if midtone_adjusted > 0.5 {
+                midtone_adjusted * settings.highlights
+            } else {
+                midtone_adjusted
+            };
+            
+            let final_value = if highlight_adjusted * 255.0 < settings.luminance_threshold {
+                (highlight_adjusted * 0.5 * 255.0) as u8
+            } else {
+                (highlight_adjusted * 255.0) as u8
+            };
+            
+            img.put_pixel(x, y, Rgba([final_value, final_value, final_value, 255]));
         }
     }
     
@@ -91,28 +115,7 @@ pub fn apply_dither(image: DynamicImage, settings: &DitherSettings) -> RgbaImage
         DitherAlgorithm::Sierra => sierra_dither(&mut img, settings),
     }
     
-    if settings.custom_black != [0, 0, 0] || settings.custom_white != [255, 255, 255] {
-        apply_custom_colors(&mut img, settings);
-    }
-    
     img
-}
-
-fn apply_custom_colors(img: &mut RgbaImage, settings: &DitherSettings) {
-    let (width, height) = (img.width(), img.height());
-    let dr = settings.custom_white[0] as i16 - settings.custom_black[0] as i16;
-    let dg = settings.custom_white[1] as i16 - settings.custom_black[1] as i16;
-    let db = settings.custom_white[2] as i16 - settings.custom_black[2] as i16;
-    
-    for y in 0..height {
-        for x in 0..width {
-            let gray = img.get_pixel(x, y)[0] as i16;
-            let r = (settings.custom_black[0] as i16 + (dr * gray) / 255) as u8;
-            let g = (settings.custom_black[1] as i16 + (dg * gray) / 255) as u8;
-            let b = (settings.custom_black[2] as i16 + (db * gray) / 255) as u8;
-            img.put_pixel(x, y, Rgba([r, g, b, 255]));
-        }
-    }
 }
 
 fn quantize_gray(value: u8, levels: u8) -> u8 {
@@ -247,7 +250,6 @@ fn random_dither(img: &mut RgbaImage, _settings: &DitherSettings) {
     for y in 0..height {
         for x in 0..width {
             let pixel = img.get_pixel(x, y);
-            // Use wrapping arithmetic to avoid overflow
             let random = ((x.wrapping_mul(1664525).wrapping_add(y.wrapping_mul(1013904223))) % 256) as f32;
             let value = if pixel[0] as f32 > random { 255 } else { 0 };
             img.put_pixel(x, y, Rgba([value, value, value, 255]));
